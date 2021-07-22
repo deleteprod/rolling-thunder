@@ -6,7 +6,7 @@ system_user=ubuntu
 if [[ -f ~/.ssh/id_rsa.pub ]]
 then
     echo "SSH key detected - using the default of ~/.ssh/id_rsa.pub"
-    for ip in `cat inventory | grep -v "\[" | cut -f1 -d" "`; do
+    for ip in `cat ../inventory/inventory.ini | grep -v "\[" | cut -f1 -d" "`; do
         ssh-copy-id -i ~/.ssh/id_rsa.pub $system_user@$ip
     done
 else
