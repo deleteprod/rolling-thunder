@@ -5,21 +5,31 @@
   tasks:
     - name: Update apt repo and cache on all Debian/Ubuntu boxes
       apt: update_cache=yes cache_valid_time=3600
+      tags: 
+        - update
 
     - name: Upgrade all packages on servers
       apt: upgrade=yes
+      tags: 
+        - upgrade
 
     - name: Check if a reboot is needed on all servers
       register: reboot_required_file
       stat: path=/var/run/reboot-required get_md5=no
+      tags: 
+        - reboot
 
     - name: Remove useless packages from the cache
       apt:
         autoclean: yes
-
+      tags:
+        - cleanup
+     
     - name: Remove dependencies that are no longer required
       apt:
         autoremove: yes
+      tags:
+        - cleanup
 
     - name: Reboot the box if kernel updated
       reboot:
@@ -30,3 +40,47 @@
         post_reboot_delay: 30
         test_command: uptime
       when: reboot_required_file.stat.exists
+      tags:
+        - reboot
+
+- hosts: servers
+  become: true
+  become_user: root
+  vars_prompt:
+    - name: docker_image
+      prompt: What is the name of the Docker image you wish to pull?
+      private: no
+  
+  tasks:
+    - name: Ensure pip and Docker are installed
+      apt:
+        pkg: 
+          - python3-pip
+          - docker.io
+        state: present
+      tags:
+        - pip
+        - docker
+        - containerd
+        - runc
+
+    - name: Ensure pip is up to date
+      pip:
+        name: pip
+        state: latest
+      tags:
+        - pip
+
+    - name: Use pip to install the latest docker module
+      pip:
+        name: docker
+        state: latest
+      tags:
+        - pip
+
+    - name: Pull latest version of a Docker image
+      docker_image:
+        name: "{{ docker_image }}"
+        source: pull 
+      tags:
+        - docker_image_pull
