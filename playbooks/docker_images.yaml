@@ -1,0 +1,15 @@
+---
+- hosts: localhost
+  become: true
+  become_user: root
+  gather_facts: false
+  tags: docker_image_pull
+  tasks:
+    - pause:
+        prompt: Which Docker image do you wish to pull down?
+        echo: true
+      register: result
+    - set_fact:
+        docker_image: "{{ result.user_input }}"
+    - debug:
+        msg: "{{ docker_image }} is the image you want. Correct?"
