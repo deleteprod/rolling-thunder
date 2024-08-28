@@ -1,0 +1,13 @@
+---
+- hosts: all
+  remote_user: root
+  gather_facts: false
+
+  tasks:
+
+    - name: Do a thing
+      apt:
+        name: nano
+        state: present
+      environment:
+        lol: lol
