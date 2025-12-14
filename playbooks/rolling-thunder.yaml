@@ -1,86 +1,200 @@
 ---
-- hosts: servers
+# System Update and Docker Management Playbook
+# This playbook updates Debian/Ubuntu systems and manages Docker images
+#
+# Usage:
+#   ansible-playbook playbook.yml --tags update
+#   ansible-playbook playbook.yml --tags docker -e "docker_image=nginx:latest"
+#   ansible-playbook playbook.yml --skip-tags reboot
+
+- name: System Update and Maintenance
+  hosts: servers
   become: true
-  become_user: root
-  tasks:
-    - name: Update apt repo and cache on all Debian/Ubuntu boxes
-      apt: update_cache=yes cache_valid_time=3600
-      tags: 
-        - update
-
-    - name: Upgrade all packages on servers
-      apt: upgrade=yes
-      tags: 
-        - upgrade
-
-    - name: Check if a reboot is needed on all servers
-      register: reboot_required_file
-      stat: path=/var/run/reboot-required get_md5=no
-      tags: 
-        - reboot
-
-    - name: Remove useless packages from the cache
-      apt:
-        autoclean: yes
-      tags:
-        - cleanup
-     
-    - name: Remove dependencies that are no longer required
-      apt:
-        autoremove: yes
-      tags:
-        - cleanup
-
-    - name: Reboot the box if kernel updated
+  
+  vars:
+    # Configurable timeouts and delays
+    apt_cache_valid_time: 3600
+    reboot_timeout: 300
+    post_reboot_delay: 30
+    
+  handlers:
+    - name: Reboot system
       reboot:
         msg: "Reboot initiated by Ansible for kernel updates"
         connect_timeout: 5
-        reboot_timeout: 300
+        reboot_timeout: "{{ reboot_timeout }}"
         pre_reboot_delay: 0
-        post_reboot_delay: 30
+        post_reboot_delay: "{{ post_reboot_delay }}"
         test_command: uptime
+      listen: "reboot if required"
+
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: true
+        cache_valid_time: "{{ apt_cache_valid_time }}"
+      tags:
+        - update
+        - always
+
+    - name: Upgrade all packages
+      apt:
+        upgrade: dist  # Changed from 'yes' to 'dist' for full upgrade
+        autoremove: true
+        autoclean: true
+      register: apt_upgrade_result
+      tags:
+        - upgrade
+
+    - name: Display upgrade summary
+      debug:
+        msg: "Upgraded {{ apt_upgrade_result.changed }} packages"
+      when: apt_upgrade_result.changed
+      tags:
+        - upgrade
+
+    - name: Check if reboot is required
+      stat:
+        path: /var/run/reboot-required
+        get_checksum: false
+        get_mime: false
+      register: reboot_required_file
+      tags:
+        - reboot
+        - always
+
+    - name: Notify if reboot is needed
+      debug:
+        msg: "WARNING: System reboot is required"
       when: reboot_required_file.stat.exists
       tags:
         - reboot
 
-- hosts: servers
+    - name: Trigger reboot handler
+      command: /bin/true
+      notify: "reboot if required"
+      when: reboot_required_file.stat.exists
+      changed_when: reboot_required_file.stat.exists
+      tags:
+        - reboot
+
+    - name: Remove unused packages from cache
+      apt:
+        autoclean: true
+      tags:
+        - cleanup
+
+    - name: Remove unused dependencies
+      apt:
+        autoremove: true
+        purge: true  # Also purge config files
+      tags:
+        - cleanup
+
+
+- name: Docker Installation and Image Management
+  hosts: servers
   become: true
-  become_user: root
-  vars_prompt:
-    - name: docker_image
-      prompt: What is the name of the Docker image you wish to pull?
-      private: no
+  
+  vars:
+    # Default Docker packages
+    docker_packages:
+      - docker.io
+      - python3-pip
+      - python3-setuptools
+    
+    # Python packages for Docker management
+    docker_python_packages:
+      - docker
+      - requests
+    
+    # Allow passing docker_image as extra var instead of prompt
+    # Usage: ansible-playbook playbook.yml -e "docker_image=nginx:latest"
   
   tasks:
-    - name: Ensure pip and Docker are installed
-      apt:
-        pkg: 
-          - python3-pip
-          - docker.io
-        state: present
-      tags:
-        - pip
-        - docker
-        - containerd
-        - runc
-
-    - name: Ensure pip is up to date
-      pip:
-        name: pip
-        state: latest
-      tags:
-        - pip
-
-    - name: Use pip to install the latest docker module
-      pip:
-        name: docker
-        state: latest
-      tags:
-        - pip
-
-    - name: Pull latest version of a Docker image
-      docker_image:
-        name: "{{ docker_image }}"
-        source: pull 
+    - name: Prompt for Docker image if not provided
+      pause:
+        prompt: "Enter the Docker image name (e.g., nginx:latest)"
+      register: docker_image_prompt
+      when: docker_image is not defined
       tags:
         - docker_image_pull
+
+    - name: Set Docker image variable
+      set_fact:
+        docker_image: "{{ docker_image_prompt.user_input | default(docker_image) }}"
+      when: docker_image is not defined
+      tags:
+        - docker_image_pull
+
+    - name: Install Docker and dependencies
+      apt:
+        name: "{{ docker_packages }}"
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+      tags:
+        - docker
+        - install
+
+    - name: Ensure Docker service is running
+      systemd:
+        name: docker
+        state: started
+        enabled: true
+      tags:
+        - docker
+        - install
+
+    - name: Install Python Docker modules via pip
+      pip:
+        name: "{{ docker_python_packages }}"
+        state: present  # Changed from 'latest' to 'present' for stability
+        executable: pip3
+      tags:
+        - docker
+        - pip
+
+    - name: Validate Docker image name format
+      assert:
+        that:
+          - docker_image is defined
+          - docker_image | length > 0
+          - "':' in docker_image or docker_image != ''"
+        fail_msg: "Invalid Docker image name. Use format 'image:tag' or 'image'"
+        success_msg: "Docker image name validated: {{ docker_image }}"
+      tags:
+        - docker_image_pull
+
+    - name: Pull Docker image
+      community.docker.docker_image:
+        name: "{{ docker_image }}"
+        source: pull
+        state: present
+      register: docker_pull_result
+      tags:
+        - docker_image_pull
+
+    - name: Display pulled image information
+      debug:
+        msg: 
+          - "Image: {{ docker_image }}"
+          - "Status: {{ 'Updated' if docker_pull_result.changed else 'Already up to date' }}"
+      tags:
+        - docker_image_pull
+
+  post_tasks:
+    - name: Verify Docker is functional
+      community.docker.docker_host_info:
+      register: docker_info
+      tags:
+        - docker
+        - verify
+
+    - name: Display Docker version
+      debug:
+        msg: "Docker version: {{ docker_info.host_info.ServerVersion }}"
+      when: docker_info.host_info is defined
+      tags:
+        - docker
+        - verify

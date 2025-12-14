@@ -1,15 +1,210 @@
 ---
-- hosts: localhost
-  become: true
-  become_user: root
-  gather_facts: false
-  tags: docker_image_pull
+# Docker Image Management Playbook
+# This playbook pulls Docker images to localhost or remote hosts
+#
+# Usage:
+#   # Interactive mode (prompts for image)
+#   ansible-playbook docker_images.yml
+#
+#   # Non-interactive mode (pass image as variable)
+#   ansible-playbook docker_images.yml -e "docker_image=nginx:latest"
+#
+#   # Pull multiple images
+#   ansible-playbook docker_images.yml -e "docker_images=['nginx:latest','redis:alpine','postgres:14']"
+#
+#   # Skip confirmation
+#   ansible-playbook docker_images.yml -e "docker_image=nginx:latest skip_confirmation=true"
+
+- name: Docker Image Management
+  hosts: localhost
+  # Note: Only use 'become' if Docker requires root access on your system
+  # Many installations allow non-root users in the 'docker' group
+  become: false
+  gather_facts: true  # Changed to true to get system info
+  
+  vars:
+    # Default values
+    skip_confirmation: false
+    docker_images: []  # For pulling multiple images
+    confirmation_timeout: 60  # Seconds to wait for confirmation
+  
+  pre_tasks:
+    - name: Gather facts if not already gathered
+      setup:
+      when: ansible_os_family is not defined
+      tags:
+        - always
+
+    - name: Check if Docker is installed
+      command: docker --version
+      register: docker_check
+      changed_when: false
+      failed_when: false
+      tags:
+        - always
+
+    - name: Fail if Docker is not installed
+      fail:
+        msg: |
+          Docker is not installed or not in PATH.
+          Please install Docker first:
+            - Debian/Ubuntu: sudo apt install docker.io
+            - RHEL/CentOS: sudo yum install docker
+      when: docker_check.rc != 0
+      tags:
+        - always
+
+    - name: Check if Docker daemon is running
+      command: docker info
+      register: docker_daemon_check
+      changed_when: false
+      failed_when: false
+      tags:
+        - always
+
+    - name: Fail if Docker daemon is not running
+      fail:
+        msg: |
+          Docker daemon is not running.
+          Start it with: sudo systemctl start docker
+      when: docker_daemon_check.rc != 0
+      tags:
+        - always
+
   tasks:
-    - pause:
-        prompt: Which Docker image do you wish to pull down?
+    # Handle single image input
+    - name: Prompt for Docker image if not provided
+      pause:
+        prompt: |
+          
+          Enter the Docker image you wish to pull (format: image:tag)
+          Examples:
+            - nginx:latest
+            - ubuntu:22.04
+            - postgres:14-alpine
+          
+          Image name
         echo: true
-      register: result
-    - set_fact:
-        docker_image: "{{ result.user_input }}"
-    - debug:
-        msg: "{{ docker_image }} is the image you want. Correct?"
+      register: docker_image_input
+      when: 
+        - docker_image is not defined
+        - docker_images | length == 0
+      tags:
+        - docker_image_pull
+
+    - name: Set docker_image fact from user input
+      set_fact:
+        docker_image: "{{ docker_image_input.user_input | trim }}"
+      when: 
+        - docker_image is not defined
+        - docker_image_input.user_input is defined
+      tags:
+        - docker_image_pull
+
+    - name: Validate Docker image name format
+      assert:
+        that:
+          - docker_image is defined or docker_images | length > 0
+          - (docker_image | default('') | length > 0) or (docker_images | length > 0)
+        fail_msg: "No Docker image specified. Use -e 'docker_image=image:tag' or answer the prompt."
+        quiet: true
+      tags:
+        - docker_image_pull
+
+    - name: Create list of images to pull
+      set_fact:
+        images_to_pull: "{{ [docker_image] if docker_image is defined else docker_images }}"
+      tags:
+        - docker_image_pull
+
+    - name: Display images to be pulled
+      debug:
+        msg: 
+          - "Images to pull:"
+          - "{{ images_to_pull | to_nice_yaml }}"
+      tags:
+        - docker_image_pull
+
+    - name: Confirm before pulling
+      pause:
+        prompt: |
+          
+          Ready to pull {{ images_to_pull | length }} image(s).
+          Continue? (yes/no)
+        echo: true
+      register: confirmation
+      when: not skip_confirmation | bool
+      tags:
+        - docker_image_pull
+
+    - name: Check confirmation response
+      fail:
+        msg: "Operation cancelled by user"
+      when: 
+        - not skip_confirmation | bool
+        - confirmation.user_input | lower not in ['yes', 'y']
+      tags:
+        - docker_image_pull
+
+    - name: Pull Docker images
+      community.docker.docker_image:
+        name: "{{ item }}"
+        source: pull
+        state: present
+        pull:
+          platform: amd64  # Specify platform if needed
+      loop: "{{ images_to_pull }}"
+      register: docker_pull_results
+      tags:
+        - docker_image_pull
+
+    - name: Display pull results
+      debug:
+        msg:
+          - "Image: {{ item.item }}"
+          - "Status: {{ 'Pulled new version' if item.changed else 'Already up to date' }}"
+          - "ID: {{ item.image.Id | default('N/A') }}"
+      loop: "{{ docker_pull_results.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      tags:
+        - docker_image_pull
+
+  post_tasks:
+    - name: List all local Docker images
+      community.docker.docker_host_info:
+      register: docker_info
+      tags:
+        - docker_image_pull
+        - list
+
+    - name: Display summary of local images
+      debug:
+        msg: |
+          Total images on system: {{ docker_info.images | length }}
+          
+          Recently pulled:
+          {% for result in docker_pull_results.results %}
+          - {{ result.item }}: {{ 'Updated' if result.changed else 'No change' }}
+          {% endfor %}
+      tags:
+        - docker_image_pull
+
+    - name: Save pull results to file (optional)
+      copy:
+        content: |
+          Docker Image Pull Report
+          ========================
+          Date: {{ ansible_date_time.iso8601 }}
+          Host: {{ ansible_hostname }}
+          
+          Images Pulled:
+          {% for result in docker_pull_results.results %}
+          - {{ result.item }}: {{ 'Updated' if result.changed else 'Already up-to-date' }}
+          {% endfor %}
+        dest: "/tmp/docker_pull_report_{{ ansible_date_time.epoch }}.txt"
+        mode: '0644'
+      when: docker_pull_results is defined
+      tags:
+        - docker_image_pull
+        - report
